@@ -25,8 +25,6 @@ class DatabaseMigrator:
 
     def _get_source_connection(self):
         """Tạo kết nối đến database nguồn"""
-
-        
         try:
             connection = mysql.connector.connect(
                 host=self.source_config['host'],
@@ -94,9 +92,15 @@ class DatabaseMigrator:
                 source_cursor.execute(f"SHOW CREATE TABLE {table}")
                 create_table_stmt = source_cursor.fetchone()['Create Table']
 
-                # Thực thi câu lệnh tạo bảng trên database đích
-                target_cursor.execute(create_table_stmt)
-                self.logger.info(f"✅ Đã copy schema cho bảng: {table}")
+                try:
+                    # Thực thi câu lệnh tạo bảng trên database đích
+                    target_cursor.execute(create_table_stmt)
+                    self.logger.info(f"✅ Đã copy schema cho bảng: {table}")
+                except mysql.connector.Error as e:
+                    if e.errno == 1050:  # Lỗi bảng đã tồn tại
+                        self.logger.warning(f"⚠️ Bảng {table} đã tồn tại, bỏ qua.")
+                    else:
+                        raise
 
             target_conn.commit()
         except Exception as e:
@@ -143,8 +147,11 @@ class DatabaseMigrator:
                     query = f"SELECT * FROM {table} LIMIT {chunk_size} OFFSET {offset}"
                     df = pd.read_sql(query, source_engine)
                     
-                    # Ghi vào database đích
-                    df.to_sql(table, target_engine, if_exists='append', index=False)
+                    try:
+                        # Ghi vào database đích
+                        df.to_sql(table, target_engine, if_exists='append', index=False)
+                    except Exception as e:
+                        self.logger.error(f"Lỗi khi ghi chunk: {e}")
                 
                 end_time = time.time()
                 self.logger.info(f"✅ Hoàn thành migrate bảng {table}: {total_records} bản ghi, {end_time - start_time:.2f} giây")
