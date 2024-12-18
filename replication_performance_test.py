@@ -50,118 +50,74 @@ class DatabaseReplicationTest:
             cursor.close()
             master_conn.close()
 
-    def write_test(self, num_records=1000):
+    def insert_select_test(self, num_inserts=1000, select_multiplier=10):
         master_conn = self._get_connection(self.master_config)
-        cursor = master_conn.cursor()
-        
+        master_cursor = master_conn.cursor()
+
         start_time = time.time()
-        
+
         try:
-            cursor.execute(f"USE {self.test_database}")
+            master_cursor.execute(f"USE {self.test_database}")
             
             # Chèn dữ liệu
-            for _ in range(num_records):
+            for _ in range(num_inserts):
                 random_data = ''.join(random.choices(string.ascii_letters, k=50))
-                cursor.execute("INSERT INTO performance_test (data) VALUES (%s)", (random_data,))
+                master_cursor.execute("INSERT INTO performance_test (data) VALUES (%s)", (random_data,))
             
             master_conn.commit()
-            end_time = time.time()
-            
-            print(f"✍️ Ghi {num_records} bản ghi: {end_time - start_time:.4f} giây")
-            return end_time - start_time
-        
-        except Exception as e:
-            print(f"❌ Lỗi ghi dữ liệu: {e}")
-        finally:
-            cursor.close()
-            master_conn.close()
+            insert_time = time.time()
+            print(f"✍️ Ghi {num_inserts} bản ghi: {insert_time - start_time:.4f} giây")
 
-    def read_test(self, num_reads=1000):
-        # Kiểm tra độ trễ replication ở các slave
-        results = []
-        
-        def test_slave(slave_config):
-            try:
-                slave_conn = self._get_connection(slave_config, is_read_only=True)
-                slave_conn.database = self.test_database
-                cursor = slave_conn.cursor()
-                
-                start_time = time.time()
-                for _ in range(num_reads):
-                    cursor.execute("SELECT * FROM performance_test ORDER BY RAND() LIMIT 10")
-                    cursor.fetchall()
-                
-                end_time = time.time()
-                
-                return {
-                    'host': slave_config['host'],
-                    'port': slave_config['port'],
-                    'time': end_time - start_time
-                }
-            
-            except Exception as e:
-                print(f"❌ Lỗi đọc dữ liệu ở {slave_config['host']}: {e}")
-                return None
-        
-        with ThreadPoolExecutor(max_workers=len(self.slave_configs)) as executor:
-            futures = [executor.submit(test_slave, slave_config) for slave_config in self.slave_configs]
-            
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    results.append(result)
-        
-        for result in results:
-            print(f"📖 Đọc từ {result['host']}:{result['port']}: {result['time']:.4f} giây")
-        
-        return results
+            # Kiểm tra slave
+            def slave_select_test(slave_config):
+                try:
+                    slave_conn = self._get_connection(slave_config, is_read_only=True)
+                    slave_conn.database = self.test_database
+                    slave_cursor = slave_conn.cursor()
 
-    def replication_lag_test(self):
-        master_conn = self._get_connection(self.master_config)
-        master_conn.database = self.test_database
-        master_cursor = master_conn.cursor()
-        
-        # Chèn một bản ghi và kiểm tra thời gian xuất hiện ở slave
-        random_data = ''.join(random.choices(string.ascii_letters, k=50))
-        
-        # Ghi vào master
-        master_cursor.execute("INSERT INTO performance_test (data) VALUES (%s)", (random_data,))
-        master_conn.commit()
-        last_insert_id = master_cursor.lastrowid
-        insert_time = time.time()
-        
-        # Kiểm tra slave
-        lag_results = []
-        for slave_config in self.slave_configs:
-            try:
-                slave_conn = self._get_connection(slave_config, is_read_only=True)
-                slave_conn.database = self.test_database
-                slave_cursor = slave_conn.cursor()
-                
-                # Chờ và kiểm tra
-                for _ in range(10):  # Thử 10 lần
-                    slave_cursor.execute("SELECT * FROM performance_test WHERE id = %s", (last_insert_id,))
-                    result = slave_cursor.fetchone()
+                    slave_start_time = time.time()
                     
+                    # Thực hiện select với số lượng gấp 10 lần số insert
+                    for _ in range(num_inserts * select_multiplier):
+                        slave_cursor.execute("SELECT * FROM performance_test ORDER BY RAND() LIMIT 1")
+                        slave_cursor.fetchall()
+
+                    slave_end_time = time.time()
+
+                    return {
+                        'host': slave_config['host'],
+                        'port': slave_config['port'],
+                        'insert_time': insert_time,
+                        'read_time': slave_end_time - slave_start_time,
+                        'read_count': num_inserts * select_multiplier
+                    }
+
+                except Exception as e:
+                    print(f"❌ Lỗi đọc dữ liệu ở {slave_config['host']}: {e}")
+                    return None
+
+            results = []
+            with ThreadPoolExecutor(max_workers=len(self.slave_configs)) as executor:
+                futures = [executor.submit(slave_select_test, slave_config) for slave_config in self.slave_configs]
+                
+                for future in as_completed(futures):
+                    result = future.result()
                     if result:
-                        replication_time = time.time()
-                        lag = replication_time - insert_time
-                        lag_results.append({
-                            'host': slave_config['host'],
-                            'port': slave_config['port'],
-                            'lag': lag
-                        })
-                        break
-                    
-                    time.sleep(0.1)  # Chờ 100ms giữa các lần thử
-                
-            except Exception as e:
-                print(f"❌ Lỗi kiểm tra độ trễ ở {slave_config['host']}: {e}")
-        
-        for result in lag_results:
-            print(f"⏱️ Độ trễ ở {result['host']}:{result['port']}: {result['lag']:.4f} giây")
-        
-        return lag_results
+                        results.append(result)
+
+            # In kết quả
+            for result in results:
+                print(f"📖 Slave {result['host']}:{result['port']}:")
+                print(f"   - Số lượng select: {result['read_count']}")
+                print(f"   - Thời gian đọc: {result['read_time']:.4f} giây")
+
+            return results
+
+        except Exception as e:
+            print(f"❌ Lỗi thực hiện test: {e}")
+        finally:
+            master_cursor.close()
+            master_conn.close()
 
 def main():
     master_config = {
@@ -191,9 +147,7 @@ def main():
     print("🚀 Bắt đầu kiểm tra hiệu năng replication")
     
     test.setup_test_database()
-    test.write_test(num_records=5000)
-    test.read_test(num_reads=1000)
-    test.replication_lag_test()
+    test.insert_select_test(num_inserts=1000, select_multiplier=10)
 
 if __name__ == "__main__":
     main()
